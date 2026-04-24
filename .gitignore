@@ -23,4 +23,6 @@ config.json
 addresses.bloom.bin
 addresses.bloom.bin.tmp
 addresses.bloom.gz
+addresses.txt
 addresses.txt.gz
+addresses.txt.gz.part

@@ -1,13 +1,27 @@
 {
-  "name": "workspace",
+  "name": "btc-key-scanner",
   "version": "2.0.0",
+  "description": "Multi-threaded Node.js CLI that brute-scans deterministic Bitcoin private keys, derives 5 address types per key, and pre-filters against a local SharedArrayBuffer-backed bloom of known-funded addresses. Educational / vanity-address use only.",
   "type": "module",
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
     "get-wallets": "node get-wallets.js"
   },
-  "license": "ISC",
+  "keywords": [
+    "bitcoin",
+    "vanity-address",
+    "bloom-filter",
+    "secp256k1",
+    "taproot",
+    "bech32",
+    "worker-threads",
+    "cli"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.3.0",
