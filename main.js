@@ -468,9 +468,8 @@ async function main() {
 
     console.log(
       `[scan] ${rate.toLocaleString()} keys/s (avg ${overallRate.toLocaleString()}/s) | ` +
-      `keys: ${totalScanned.toLocaleString()} | addrs: ${addrChecked.toLocaleString()} | ` +
-      `counter: ${state.counter.toLocaleString()} | workers: ${activeWorkers} | ` +
-      `vanity: ${session.vanity} | bloom: ${session.bloomMatch} | found: ${session.found} | ` +
+      `Total wallet dibuat sesi ini: ${totalScanned.toLocaleString()} | ` +
+      `workers: ${activeWorkers} | found: ${session.found} | ` +
       `up: ${formatDuration(elapsed)}`
     );
 
