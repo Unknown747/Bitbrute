@@ -17,7 +17,8 @@ Originally a Python script (`main.py`) that hit a defunct external balance API o
 ## Project Structure
 
 - `main.js` — main loop: state, bloom filter (load/build/cache), key derivation, vanity, balance lookup.
-- `addresses.txt` — sample (~15) of well-known Bitcoin addresses for the bloom filter on Replit. **Replace with the real ~50M-address dump on a real machine / VPS** — see header comment in the file for the source URL.
+- `get-wallets.js` — utility to download the latest known-funded Bitcoin address list (~500 MB gzipped) into `addresses.txt.gz`. Run with `node get-wallets.js`. Supports `--force`, `--url`, `--out`, `--help`. After download it auto-invalidates the bloom cache so the next `main.js` run rebuilds.
+- `addresses.txt` — sample (~15) of well-known Bitcoin addresses for the bloom filter on Replit. **Replace with the real ~50M-address dump on a real machine / VPS** — easiest way is to run `node get-wallets.js`.
 - `package.json` / `package-lock.json` — Node project / dependency lockfile.
 - `.replit` — Replit configuration.
 - `.gitignore` — ignores `node_modules`, runtime state, output files, and the bloom cache.
@@ -45,10 +46,7 @@ Originally a Python script (`main.py`) that hit a defunct external balance API o
 ## Replit vs. Real Machine
 
 - On Replit (this project): `addresses.txt` ships with ~15 famous addresses just to demonstrate the bloom-filter architecture. Hits in this set are statistically impossible from random scanning — it is for setup verification only.
-- On your own machine / VPS: download the full known-funded-address list (e.g. from `http://addresses.loyce.club/`). Save it as either:
-  - `addresses.txt` (uncompressed, ~1.5 GB), or
-  - `addresses.txt.gz` (gzipped, ~500 MB) — read directly without unzipping.
-  The first start will stream-build the bloom filter (~3–5 min for 50M entries on typical hardware) and cache it to `addresses.bloom.gz` (~150 MB). Every restart after that is instant.
+- On your own machine / VPS: just run `node get-wallets.js`. That fetches the latest list from `http://addresses.loyce.club/` directly to `addresses.txt.gz` (gzipped, ~500 MB) and clears the old bloom cache. Then run `node main.js` — the first start will stream-build the bloom filter (~3–5 min for 50M entries on typical hardware) and cache it to `addresses.bloom.gz` (~150 MB). Every restart after that is instant.
 
 ## Notes
 
