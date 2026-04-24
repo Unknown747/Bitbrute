@@ -1,22 +1,16 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.pythonlibs/
-.venv/
-venv/
-env/
-ENV/
-
-# uv
-.uv/
+# Node
+node_modules/
+npm-debug.log*
 
 # Replit
 .upm/
 .cache/
 .agents/
+.pythonlibs/
 
-# Project output
+# Runtime state & outputs
+state.json
+found.txt
+vanity.txt
+near-miss.txt
 bitforce-found.txt
