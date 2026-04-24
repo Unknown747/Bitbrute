@@ -1,15 +1,16 @@
 import { parentPort, workerData } from "worker_threads";
 import { createHash } from "crypto";
-import { loadBloomFromCacheSync } from "./bloom.js";
-import { deriveAll, isValidPrivKey, wifEncode, toHex } from "./keys.js";
+import { loadBloomFromShared } from "./bloom.js";
+import { deriveEnabled, isValidPrivKey, wifEncode, toHex } from "./keys.js";
 
-const { workerId, seedHex, bloomCachePath, vanityPatterns } = workerData;
+const { workerId, seedHex, bloom: bloomMeta, vanityPatterns, addressTypes } =
+  workerData;
+
 const seedBuf = Buffer.from(seedHex, "hex");
 
-let bloom = null;
-if (bloomCachePath) {
-  bloom = loadBloomFromCacheSync();
-}
+const bloom = bloomMeta
+  ? loadBloomFromShared(bloomMeta.sab, bloomMeta.m, bloomMeta.k)
+  : null;
 
 const ctrBuf = Buffer.alloc(8);
 
@@ -25,12 +26,17 @@ function checkVanity(addr) {
   return null;
 }
 
-const ADDRESS_TYPES = [
-  { key: "p2pkhComp", label: "p2pkh-comp", compressed: true },
-  { key: "p2pkhUncomp", label: "p2pkh-uncomp", compressed: false },
-  { key: "p2sh", label: "p2sh-segwit", compressed: true },
-  { key: "p2wpkh", label: "p2wpkh", compressed: true },
-];
+const TYPE_LABELS = {
+  p2pkhComp: { label: "p2pkh-comp", compressed: true },
+  p2pkhUncomp: { label: "p2pkh-uncomp", compressed: false },
+  p2sh: { label: "p2sh-segwit", compressed: true },
+  p2wpkh: { label: "p2wpkh", compressed: true },
+  p2tr: { label: "p2tr", compressed: true },
+};
+
+const ENABLED_TYPES = Object.keys(TYPE_LABELS).filter(
+  (k) => addressTypes[k],
+);
 
 function processBatch(startCounter, count) {
   const hits = [];
@@ -51,24 +57,26 @@ function processBatch(startCounter, count) {
 
     let addrs;
     try {
-      addrs = deriveAll(privKey);
+      addrs = deriveEnabled(privKey, addressTypes);
     } catch (e) {
       invalid++;
       continue;
     }
 
-    for (const t of ADDRESS_TYPES) {
-      const addr = addrs[t.key];
+    for (const k of ENABLED_TYPES) {
+      const addr = addrs[k];
+      if (!addr) continue;
       const vanity = checkVanity(addr);
       const bloomMatch = bloom ? bloom.has(addr) : false;
       if (vanity || bloomMatch) {
+        const meta = TYPE_LABELS[k];
         hits.push({
           counter,
-          type: t.label,
+          type: meta.label,
           addr,
           vanity,
           bloomMatch,
-          wif: wifEncode(privKey, t.compressed),
+          wif: wifEncode(privKey, meta.compressed),
           privHex: toHex(privKey),
         });
         if (vanity) vanityHits++;

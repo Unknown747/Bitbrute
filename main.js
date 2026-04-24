@@ -5,6 +5,8 @@ import { Worker } from "worker_threads";
 import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import { ensureBloomCache } from "./bloom.js";
+import { loadConfig } from "./config.js";
+import { notifyTelegram, shouldNotify } from "./notify.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,29 +14,6 @@ const STATE_FILE = "state.json";
 const FOUND_FILE = "found.txt";
 const VANITY_FILE = "vanity.txt";
 const NEAR_MISS_FILE = "near-miss.txt";
-
-const VANITY_PATTERNS = [
-  "1Love",
-  "1Lucky",
-  "1Bitcoin",
-  "1Satoshi",
-  "1Crypto",
-  "1Money",
-  "1Cash",
-  "1Boss",
-  "1ABCD",
-  "1Free",
-];
-
-const BATCH_SIZE = 2000;
-
-const MIN_WORKERS = 1;
-const MAX_WORKERS = Math.max(1, os.cpus().length);
-const SCALE_INTERVAL_MS = 5000;
-const SCALE_COOLDOWN_MS = 8000;
-const LAG_HIGH_MS = 120;
-const LAG_LOW_MS = 30;
-const FREE_MEM_MIN = 0.15;
 
 const BALANCE_PROVIDERS = [
   {
@@ -80,6 +59,12 @@ const session = {
 };
 
 function loadState() {
+  const tmp = STATE_FILE + ".tmp";
+  if (fs.existsSync(tmp)) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch (_) {}
+  }
   if (fs.existsSync(STATE_FILE)) {
     try {
       const s = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
@@ -102,7 +87,9 @@ function loadState() {
 }
 
 function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+  const tmp = STATE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(state));
+  fs.renameSync(tmp, STATE_FILE);
 }
 
 function formatDuration(ms) {
@@ -130,7 +117,7 @@ function freeMemRatio() {
   return os.freemem() / os.totalmem();
 }
 
-const balanceState = { providerIdx: 0, consecutiveErrors: 0 };
+const balanceState = { providerIdx: 0 };
 
 async function getBalance(address) {
   for (let attempt = 0; attempt < BALANCE_PROVIDERS.length; attempt++) {
@@ -147,13 +134,14 @@ async function getBalance(address) {
         continue;
       }
       if (!res.ok) {
-        console.log(`\n[balance] ${provider.name} HTTP ${res.status}, trying next.`);
+        console.log(
+          `\n[balance] ${provider.name} HTTP ${res.status}, trying next.`,
+        );
         continue;
       }
       const balance = await provider.parse(res);
       balanceState.providerIdx =
         (balanceState.providerIdx + attempt) % BALANCE_PROVIDERS.length;
-      balanceState.consecutiveErrors = 0;
       return { balance, providerName: provider.name };
     } catch (err) {
       console.log(
@@ -161,11 +149,10 @@ async function getBalance(address) {
       );
     }
   }
-  balanceState.consecutiveErrors++;
   return { balance: null, providerName: null };
 }
 
-async function handleHit(hit, state) {
+async function handleHit(hit, state, config) {
   const baseRec =
     `counter=${hit.counter}  type=${hit.type}\n` +
     `Address: ${hit.addr}\n` +
@@ -178,6 +165,12 @@ async function handleHit(hit, state) {
     fs.appendFileSync(VANITY_FILE, rec);
     session.vanity++;
     state.totals.vanity++;
+    if (shouldNotify(config, "vanity")) {
+      await notifyTelegram(
+        config,
+        `*Vanity hit* \`${hit.vanity}\`\nType: ${hit.type}\nAddress: \`${hit.addr}\`\nWIF: \`${hit.wif}\``,
+      );
+    }
   }
 
   if (hit.bloomMatch) {
@@ -186,6 +179,12 @@ async function handleHit(hit, state) {
     fs.appendFileSync(NEAR_MISS_FILE, rec);
     session.bloomMatch++;
     state.totals.bloomMatch++;
+    if (shouldNotify(config, "bloomMatch")) {
+      await notifyTelegram(
+        config,
+        `*Bloom match*\nType: ${hit.type}\nAddress: \`${hit.addr}\`\nChecking balance...`,
+      );
+    }
 
     const { balance, providerName } = await getBalance(hit.addr);
     if (balance !== null && balance > 0) {
@@ -196,11 +195,20 @@ async function handleHit(hit, state) {
       fs.appendFileSync(FOUND_FILE, rec2);
       session.found++;
       state.totals.found++;
+      if (shouldNotify(config, "found")) {
+        await notifyTelegram(
+          config,
+          `🚨 *FOUND* (${providerName})\nType: ${hit.type}\nBalance: \`${balance}\` sat\nAddress: \`${hit.addr}\`\nWIF: \`${hit.wif}\`\nKey: \`${hit.privHex}\``,
+        );
+      }
     }
   }
 }
 
-function printStartStats(state, bloomInfo, initialWorkers) {
+function printStartStats(state, bloomInfo, initialWorkers, config, scaling) {
+  const enabledTypes = Object.entries(config.scanning.addressTypes)
+    .filter(([, v]) => v)
+    .map(([k]) => k);
   console.log("");
   console.log("================ START ================");
   if (state.counter === 0) {
@@ -211,16 +219,19 @@ function printStartStats(state, bloomInfo, initialWorkers) {
     );
   }
   console.log(
-    `  Bloom     : ${bloomInfo ? `enabled (${bloomInfo.count.toLocaleString()} addresses)` : "disabled (API per key)"}`,
+    `  Bloom     : ${bloomInfo ? `enabled (${bloomInfo.count.toLocaleString()} addresses, shared SAB ${(bloomInfo.m / 8 / 1024).toFixed(1)} KB)` : "disabled (API per key)"}`,
   );
   console.log(
-    `  Address   : 4 types per key (P2PKH comp/uncomp, P2SH-SegWit, Bech32 SegWit)`,
+    `  Address   : ${enabledTypes.length} types per key (${enabledTypes.join(", ")})`,
   );
   console.log(
-    `  Workers   : ${initialWorkers} (adaptive ${MIN_WORKERS}..${MAX_WORKERS}, cores=${os.cpus().length})`,
+    `  Workers   : ${initialWorkers} (adaptive ${scaling.minWorkers}..${scaling.maxWorkers}, cores=${os.cpus().length})`,
   );
   console.log(
     `  Providers : ${BALANCE_PROVIDERS.map((p) => p.name).join(", ")}`,
+  );
+  console.log(
+    `  Telegram  : ${config.telegram.enabled ? `enabled (chat=${config.telegram.chatId})` : "disabled (set in config.json)"}`,
   );
   console.log(
     `  Lifetime  : vanity=${state.totals.vanity}  bloom-match=${state.totals.bloomMatch}  found=${state.totals.found}`,
@@ -229,7 +240,7 @@ function printStartStats(state, bloomInfo, initialWorkers) {
   console.log("");
 }
 
-function printStopStats(state, finalWorkers) {
+function printStopStats(state, finalWorkers, addressMultiplier) {
   const elapsed = Date.now() - session.startTime;
   const scanned = session.scanned;
   const rate = elapsed > 0 ? (scanned / (elapsed / 1000)).toFixed(1) : "0";
@@ -237,7 +248,7 @@ function printStopStats(state, finalWorkers) {
   console.log("================ STOP =================");
   console.log(`  Session   : ${formatDuration(elapsed)}`);
   console.log(
-    `  Scanned   : ${scanned.toLocaleString()} keys (${rate}/s, ~${(scanned * 4).toLocaleString()} addresses)`,
+    `  Scanned   : ${scanned.toLocaleString()} keys (${rate}/s, ~${(scanned * addressMultiplier).toLocaleString()} addresses)`,
   );
   console.log(
     `  Hits      : vanity=${session.vanity}  bloom-match=${session.bloomMatch}  found=${session.found}`,
@@ -254,6 +265,29 @@ function printStopStats(state, finalWorkers) {
 }
 
 async function main() {
+  const config = loadConfig();
+  const cores = os.cpus().length;
+  const scaling = {
+    minWorkers: Math.max(1, config.scaling.minWorkers),
+    maxWorkers: Math.max(
+      1,
+      Math.min(config.scaling.maxWorkers ?? cores, cores),
+    ),
+    lagHighMs: config.scaling.lagHighMs,
+    lagLowMs: config.scaling.lagLowMs,
+    freeMemMin: config.scaling.freeMemMin,
+    intervalMs: config.scaling.intervalMs,
+    cooldownMs: config.scaling.cooldownMs,
+  };
+  const batchSize = Math.max(100, config.scanning.batchSize);
+  const enabledTypeCount = Object.values(config.scanning.addressTypes).filter(
+    Boolean,
+  ).length;
+  if (enabledTypeCount === 0) {
+    console.error("config.json: no address types enabled. Aborting.");
+    process.exit(1);
+  }
+
   const state = loadState();
   const bloomInfo = await ensureBloomCache();
 
@@ -267,7 +301,6 @@ async function main() {
   let lastSave = Date.now();
   let lastScale = 0;
   let stopping = false;
-  let stoppedSignal = null;
 
   function advanceCounter() {
     while (completedBatches.has(state.counter)) {
@@ -280,11 +313,10 @@ async function main() {
   function dispatch(entry) {
     if (stopping || entry.stopping) return;
     const start = assignedCounter;
-    const count = BATCH_SIZE;
-    assignedCounter += count;
+    assignedCounter += batchSize;
     entry.busy = true;
     entry.batchStart = start;
-    entry.worker.postMessage({ type: "scan", startCounter: start, count });
+    entry.worker.postMessage({ type: "scan", startCounter: start, count: batchSize });
   }
 
   function spawnWorker() {
@@ -293,8 +325,11 @@ async function main() {
       workerData: {
         workerId: id,
         seedHex: state.seed,
-        bloomCachePath: bloomInfo ? bloomInfo.path : null,
-        vanityPatterns: VANITY_PATTERNS,
+        bloom: bloomInfo
+          ? { sab: bloomInfo.sab, m: bloomInfo.m, k: bloomInfo.k }
+          : null,
+        vanityPatterns: config.vanityPatterns,
+        addressTypes: config.scanning.addressTypes,
       },
     });
     const entry = { id, worker, busy: false, stopping: false };
@@ -308,10 +343,14 @@ async function main() {
         completedBatches.set(msg.startCounter, msg.count);
         advanceCounter();
         for (const hit of msg.hits) {
-          await handleHit(hit, state);
+          await handleHit(hit, state, config);
         }
         if (Date.now() - lastSave > 2000) {
-          saveState(state);
+          try {
+            saveState(state);
+          } catch (e) {
+            console.log(`state save failed: ${e.message}`);
+          }
           lastSave = Date.now();
         }
         entry.busy = false;
@@ -340,22 +379,20 @@ async function main() {
   function stopOneWorker(reason) {
     let target = null;
     for (const e of workers.values()) {
-      if (!e.stopping) {
-        target = e;
-      }
+      if (!e.stopping) target = e;
     }
     if (!target) return false;
     target.stopping = true;
-    if (!target.busy) {
-      target.worker.postMessage({ type: "stop" });
-    }
-    console.log(`[scale] workers: ${workers.size} → ${workers.size - 1} (${reason})`);
+    if (!target.busy) target.worker.postMessage({ type: "stop" });
+    console.log(
+      `[scale] workers: ${workers.size} → ${workers.size - 1} (${reason})`,
+    );
     session.scaleEvents++;
     return true;
   }
 
   function startOneWorker(reason) {
-    if (workers.size >= MAX_WORKERS) return false;
+    if (workers.size >= scaling.maxWorkers) return false;
     spawnWorker();
     console.log(
       `[scale] workers: ${workers.size - 1} → ${workers.size} (${reason})`,
@@ -366,24 +403,22 @@ async function main() {
 
   async function scaleTick() {
     if (stopping) return;
-    if (Date.now() - lastScale < SCALE_COOLDOWN_MS) return;
+    if (Date.now() - lastScale < scaling.cooldownMs) return;
 
     const lag = await measureEventLoopLag();
     const memFree = freeMemRatio();
     const active = [...workers.values()].filter((e) => !e.stopping).length;
 
-    if (memFree < FREE_MEM_MIN && active > MIN_WORKERS) {
+    if (memFree < scaling.freeMemMin && active > scaling.minWorkers) {
       if (
-        stopOneWorker(
-          `mem low (free=${(memFree * 100).toFixed(0)}%)`,
-        )
+        stopOneWorker(`mem low (free=${(memFree * 100).toFixed(0)}%)`)
       ) {
         lastScale = Date.now();
       }
       return;
     }
 
-    if (lag > LAG_HIGH_MS && active > MIN_WORKERS) {
+    if (lag > scaling.lagHighMs && active > scaling.minWorkers) {
       if (
         stopOneWorker(
           `lag high (${lag.toFixed(0)}ms, free=${(memFree * 100).toFixed(0)}%)`,
@@ -394,7 +429,7 @@ async function main() {
       return;
     }
 
-    if (lag < LAG_LOW_MS && memFree > 0.3 && active < MAX_WORKERS) {
+    if (lag < scaling.lagLowMs && memFree > 0.3 && active < scaling.maxWorkers) {
       if (
         startOneWorker(
           `idle (lag=${lag.toFixed(0)}ms, free=${(memFree * 100).toFixed(0)}%)`,
@@ -405,24 +440,24 @@ async function main() {
     }
   }
 
-  const initialWorkers = Math.min(2, MAX_WORKERS);
-  printStartStats(state, bloomInfo, initialWorkers);
+  const initialWorkers = Math.min(
+    Math.max(scaling.minWorkers, 2),
+    scaling.maxWorkers,
+  );
+  printStartStats(state, bloomInfo, initialWorkers, config, scaling);
   for (let i = 0; i < initialWorkers; i++) spawnWorker();
   lastScale = Date.now();
 
-  const scaleTimer = setInterval(scaleTick, SCALE_INTERVAL_MS);
+  const scaleTimer = setInterval(scaleTick, scaling.intervalMs);
 
   const shutdown = (signal) => {
     if (stopping) return;
     stopping = true;
-    stoppedSignal = signal;
     clearInterval(scaleTimer);
     console.log(`\nReceived ${signal}, draining workers...`);
     for (const entry of workers.values()) {
       entry.stopping = true;
-      if (!entry.busy) {
-        entry.worker.postMessage({ type: "stop" });
-      }
+      if (!entry.busy) entry.worker.postMessage({ type: "stop" });
     }
     const finalWorkers = workers.size;
     const drainDeadline = Date.now() + 8000;
@@ -437,7 +472,7 @@ async function main() {
         try {
           saveState(state);
         } catch (e) {}
-        printStopStats(state, finalWorkers);
+        printStopStats(state, finalWorkers, enabledTypeCount);
         process.exit(0);
       }
     }, 100);

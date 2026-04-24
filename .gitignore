@@ -10,11 +10,17 @@ npm-debug.log*
 
 # Runtime state & outputs
 state.json
+state.json.tmp
 found.txt
 vanity.txt
 near-miss.txt
 bitforce-found.txt
 
+# User config (may contain Telegram token)
+config.json
+
 # Bloom filter cache & large address lists
+addresses.bloom.bin
+addresses.bloom.bin.tmp
 addresses.bloom.gz
 addresses.txt.gz

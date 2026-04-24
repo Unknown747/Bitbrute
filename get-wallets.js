@@ -6,7 +6,8 @@ import * as path from "path";
 const DEFAULT_URL =
   "http://addresses.loyce.club/Bitcoin_addresses_LATEST.txt.gz";
 const DEFAULT_OUT = "addresses.txt.gz";
-const BLOOM_CACHE_FILE = "addresses.bloom.gz";
+const BLOOM_CACHE_FILE = "addresses.bloom.bin";
+const LEGACY_BLOOM_CACHE_FILE = "addresses.bloom.gz";
 
 function parseArgs(argv) {
   const opts = { url: DEFAULT_URL, out: DEFAULT_OUT, force: false };
@@ -174,13 +175,17 @@ async function main() {
 
   const isAddressList =
     opts.out === DEFAULT_OUT || opts.out === "addresses.txt";
-  if (isAddressList && fs.existsSync(BLOOM_CACHE_FILE)) {
-    try {
-      fs.unlinkSync(BLOOM_CACHE_FILE);
-      console.log(
-        `Removed stale ${BLOOM_CACHE_FILE} — main.js will rebuild it on next start.`,
-      );
-    } catch (e) {}
+  if (isAddressList) {
+    for (const f of [BLOOM_CACHE_FILE, LEGACY_BLOOM_CACHE_FILE]) {
+      if (fs.existsSync(f)) {
+        try {
+          fs.unlinkSync(f);
+          console.log(
+            `Removed stale ${f} — main.js will rebuild it on next start.`,
+          );
+        } catch (e) {}
+      }
+    }
   }
 
   if (isAddressList) {

@@ -2,11 +2,14 @@ import * as secp from "@noble/secp256k1";
 import { sha256 } from "@noble/hashes/sha256";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import bs58check from "bs58check";
-import { bech32 } from "bech32";
+import { bech32, bech32m } from "bech32";
 
-const N_MINUS_1 = BigInt(
-  "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140",
+const N = BigInt(
+  "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
 );
+const N_MINUS_1 = N - 1n;
+
+const TAP_TWEAK_TAG = sha256(new TextEncoder().encode("TapTweak"));
 
 export function isValidPrivKey(buf) {
   let allZero = true;
@@ -26,12 +29,21 @@ function hash160(data) {
   return ripemd160(sha256(data));
 }
 
-function p2pkh(pubKey) {
-  const h = hash160(pubKey);
+function bytesToBigInt(bytes) {
+  let v = 0n;
+  for (let i = 0; i < bytes.length; i++) v = (v << 8n) | BigInt(bytes[i]);
+  return v;
+}
+
+function p2pkhFromH160(h) {
   const payload = new Uint8Array(21);
   payload[0] = 0x00;
   payload.set(h, 1);
   return bs58check.encode(payload);
+}
+
+function p2pkh(pubKey) {
+  return p2pkhFromH160(hash160(pubKey));
 }
 
 function p2sh(scriptHash) {
@@ -42,29 +54,55 @@ function p2sh(scriptHash) {
 }
 
 function p2wpkh(pubKeyHash) {
-  const words = bech32.toWords(pubKeyHash);
-  return bech32.encode("bc", [0, ...words]);
+  return bech32.encode("bc", [0, ...bech32.toWords(pubKeyHash)]);
 }
 
-export function deriveAll(privKey32) {
-  const pubComp = secp.getPublicKey(privKey32, true);
-  const pubUncomp = secp.getPublicKey(privKey32, false);
-  const h160Comp = hash160(pubComp);
+function p2tr(pubComp) {
+  const xOnly = pubComp.slice(1);
+  const evenComp = new Uint8Array(33);
+  evenComp[0] = 0x02;
+  evenComp.set(xOnly, 1);
 
-  const redeem = new Uint8Array(22);
-  redeem[0] = 0x00;
-  redeem[1] = 0x14;
-  redeem.set(h160Comp, 2);
-  const redeemHash = hash160(redeem);
+  const inner = new Uint8Array(64 + 32);
+  inner.set(TAP_TWEAK_TAG, 0);
+  inner.set(TAP_TWEAK_TAG, 32);
+  inner.set(xOnly, 64);
+  const tweak = bytesToBigInt(sha256(inner)) % N;
 
-  return {
-    p2pkhComp: p2pkh(pubComp),
-    p2pkhUncomp: p2pkh(pubUncomp),
-    p2sh: p2sh(redeemHash),
-    p2wpkh: p2wpkh(h160Comp),
-    pubComp,
-    pubUncomp,
-  };
+  const P = secp.ProjectivePoint.fromHex(evenComp);
+  const Q = secp.ProjectivePoint.BASE.multiplyAndAddUnsafe(P, tweak, 1n);
+  const Qx = Q.toRawBytes(true).slice(1);
+  return bech32m.encode("bc", [1, ...bech32m.toWords(Qx)]);
+}
+
+export function deriveEnabled(privKey32, types) {
+  const out = {};
+  let pubComp = null;
+  let h160Comp = null;
+
+  const needComp =
+    types.p2pkhComp || types.p2sh || types.p2wpkh || types.p2tr;
+  if (needComp) {
+    pubComp = secp.getPublicKey(privKey32, true);
+    h160Comp = hash160(pubComp);
+  }
+
+  if (types.p2pkhComp) out.p2pkhComp = p2pkhFromH160(h160Comp);
+  if (types.p2pkhUncomp) {
+    const pubUncomp = secp.getPublicKey(privKey32, false);
+    out.p2pkhUncomp = p2pkh(pubUncomp);
+  }
+  if (types.p2sh) {
+    const redeem = new Uint8Array(22);
+    redeem[0] = 0x00;
+    redeem[1] = 0x14;
+    redeem.set(h160Comp, 2);
+    out.p2sh = p2sh(hash160(redeem));
+  }
+  if (types.p2wpkh) out.p2wpkh = p2wpkh(h160Comp);
+  if (types.p2tr) out.p2tr = p2tr(pubComp);
+
+  return out;
 }
 
 export function wifEncode(privKey32, compressed) {
