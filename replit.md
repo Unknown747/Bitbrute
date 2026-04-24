@@ -1,26 +1,30 @@
 # Project Overview
 
-A Python command-line script (`main.py`) that generates random Bitcoin private keys, derives the corresponding public key and address, and queries an external API to look up the wallet balance.
+A Node.js command-line script (`main.js`) that generates random Bitcoin private keys, derives the corresponding public key and address (P2PKH / legacy), and queries the Blockstream public API for the wallet balance. Originally a Python script (`main.py`); rewritten in JavaScript and the broken external API was replaced.
 
 ## Project Structure
 
-- `main.py` — single-file Python script containing all logic (key generation, address derivation, balance lookup, main loop).
-- `pyproject.toml` / `uv.lock` — Python project / dependency lockfile (managed by `uv`).
-- `.replit` — Replit configuration (Python 3.12, NixOS stable-25_05).
+- `main.js` — Node.js script: key generation, address derivation, balance lookup, main loop.
+- `package.json` / `package-lock.json` — Node project / dependency lockfile.
+- `.replit` — Replit configuration.
+- `.gitignore` — ignores `node_modules`, build artifacts, and `bitforce-found.txt`.
 
 ## Runtime / Tooling
 
-- Language: Python 3.12
-- Dependencies: `bit`, `ecdsa`, `requests` (with transitive deps `coincurve`, `certifi`, `urllib3`, etc.)
-- Package manager: `uv` (managed automatically by Replit's package tooling)
+- Language: Node.js 20
+- Dependency: `bitcore-lib` (Bitcoin key & address handling)
+- HTTP: built-in global `fetch`
+- Balance API: `https://blockstream.info/api/address/<address>` (replaces the defunct `webbtc.com` endpoint used by the original Python version)
 
 ## Workflows
 
-- `Start application` — runs `python main.py` as a console process (no port; this is a CLI script, not a web app).
+- `Start application` — runs `node main.js` as a console process. No port; this is a CLI loop, not a web app.
 
-## Known Issues
+## Behavior
 
-- The script calls `http://webbtc.com/address/<addr>.json` for balance lookups. That endpoint appears to be offline / no longer returning JSON, which causes a `JSONDecodeError` at runtime. This is an upstream third-party issue in the original code and is unrelated to the Replit environment setup.
+- Generates a random private key, prints its address with balance `0` for each iteration (the overwhelming common case).
+- If a non-zero balance is ever found, the full record (address, hex private key, WIF, uncompressed public key, balance in satoshis) is printed and appended to `bitforce-found.txt`.
+- Handles HTTP 429 (rate-limit) and other errors with sleep-and-retry.
 
 ## Notes
 
