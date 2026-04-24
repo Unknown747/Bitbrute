@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pythonlibs/
+.venv/
+venv/
+env/
+ENV/
+
+# uv
+.uv/
+
+# Replit
+.upm/
+.cache/
+.agents/
+
+# Project output
+bitforce-found.txt
