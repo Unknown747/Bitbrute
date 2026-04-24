@@ -14,3 +14,7 @@ found.txt
 vanity.txt
 near-miss.txt
 bitforce-found.txt
+
+# Bloom filter cache & large address lists
+addresses.bloom.gz
+addresses.txt.gz

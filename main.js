@@ -1,10 +1,14 @@
 const bitcore = require("bitcore-lib");
 const { BloomFilter } = require("bloom-filters");
 const fs = require("fs");
+const readline = require("readline");
+const zlib = require("zlib");
 const crypto = require("crypto");
 
 const STATE_FILE = "state.json";
-const ADDRESSES_FILE = "addresses.txt";
+const ADDRESSES_TXT = "addresses.txt";
+const ADDRESSES_GZ = "addresses.txt.gz";
+const BLOOM_CACHE_FILE = "addresses.bloom.gz";
 const FOUND_FILE = "found.txt";
 const VANITY_FILE = "vanity.txt";
 const NEAR_MISS_FILE = "near-miss.txt";
@@ -22,8 +26,12 @@ const VANITY_PATTERNS = [
   "1Free",
 ];
 
+const BLOOM_FP_RATE = 0.0001;
 const PROGRESS_INTERVAL = 1000;
 const SAVE_INTERVAL = 1000;
+
+const BUILD_PROGRESS_LINES = 1_000_000;
+const BUILD_YIELD_LINES = 50_000;
 
 const apiState = { pause: 0 };
 
@@ -54,27 +62,155 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state));
 }
 
-function loadBloomFilter() {
-  if (!fs.existsSync(ADDRESSES_FILE)) {
+function findAddressesSource() {
+  if (fs.existsSync(ADDRESSES_GZ)) return ADDRESSES_GZ;
+  if (fs.existsSync(ADDRESSES_TXT)) return ADDRESSES_TXT;
+  return null;
+}
+
+function estimateAddressCount(sourcePath, sizeBytes) {
+  const bytesPerAddr = 35;
+  const compressionRatio = sourcePath.endsWith(".gz") ? 4 : 1;
+  const est = Math.ceil((sizeBytes * compressionRatio) / bytesPerAddr);
+  return Math.max(1024, Math.ceil(est * 1.2));
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function openAddressStream(sourcePath) {
+  let stream = fs.createReadStream(sourcePath);
+  if (sourcePath.endsWith(".gz")) {
+    stream = stream.pipe(zlib.createGunzip());
+  }
+  return stream;
+}
+
+async function buildBloomFromStream(sourcePath, capacity) {
+  const filter = BloomFilter.create(capacity, BLOOM_FP_RATE);
+  const rl = readline.createInterface({
+    input: openAddressStream(sourcePath),
+    crlfDelay: Infinity,
+  });
+
+  let count = 0;
+  const start = Date.now();
+  for await (const raw of rl) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    filter.add(line);
+    count++;
+
+    if (count % BUILD_PROGRESS_LINES === 0) {
+      const sec = (Date.now() - start) / 1000;
+      const rate = Math.round(count / sec);
+      console.log(
+        `  [build] ${count.toLocaleString()} addresses indexed (${rate.toLocaleString()}/s, ${sec.toFixed(1)}s)`,
+      );
+    }
+    if (count % BUILD_YIELD_LINES === 0) {
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+  const sec = (Date.now() - start) / 1000;
+  console.log(
+    `  [build] complete: ${count.toLocaleString()} addresses in ${sec.toFixed(1)}s`,
+  );
+  return { filter, count };
+}
+
+async function saveBloomCache(filter, sourceMtimeMs, count, capacity) {
+  const payload = {
+    version: 1,
+    sourceMtimeMs,
+    count,
+    capacity,
+    fpRate: BLOOM_FP_RATE,
+    filter: filter.saveAsJSON(),
+  };
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(BLOOM_CACHE_FILE);
+    const gz = zlib.createGzip({ level: 6 });
+    gz.pipe(out);
+    out.on("finish", resolve);
+    out.on("error", reject);
+    gz.on("error", reject);
+    gz.end(JSON.stringify(payload));
+  });
+}
+
+async function loadBloomCache(expectedSourceMtimeMs) {
+  if (!fs.existsSync(BLOOM_CACHE_FILE)) return null;
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    fs.createReadStream(BLOOM_CACHE_FILE)
+      .pipe(zlib.createGunzip())
+      .on("data", (c) => chunks.push(c))
+      .on("end", () => {
+        try {
+          const obj = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          if (
+            expectedSourceMtimeMs != null &&
+            obj.sourceMtimeMs !== expectedSourceMtimeMs
+          ) {
+            console.log(
+              "Bloom cache is stale (source file changed). Rebuilding...",
+            );
+            return resolve(null);
+          }
+          const filter = BloomFilter.fromJSON(obj.filter);
+          resolve({ filter, count: obj.count });
+        } catch (e) {
+          console.log(
+            `Bloom cache unreadable (${e.message}). Rebuilding...`,
+          );
+          resolve(null);
+        }
+      })
+      .on("error", (err) => {
+        console.log(`Bloom cache read error (${err.message}). Rebuilding...`);
+        resolve(null);
+      });
+  });
+}
+
+async function loadBloomFilter() {
+  const sourcePath = findAddressesSource();
+  if (!sourcePath) {
     console.log(
-      `No ${ADDRESSES_FILE} found — bloom filter disabled, will hit API every iteration.`,
+      `No ${ADDRESSES_TXT} or ${ADDRESSES_GZ} found — bloom filter disabled, will hit API every iteration.`,
     );
     return null;
   }
-  const lines = fs
-    .readFileSync(ADDRESSES_FILE, "utf8")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith("#"));
-  if (lines.length === 0) {
-    console.log("addresses.txt is empty — bloom filter disabled.");
-    return null;
+
+  const stat = fs.statSync(sourcePath);
+  const cached = await loadBloomCache(stat.mtimeMs);
+  if (cached) {
+    const cacheStat = fs.statSync(BLOOM_CACHE_FILE);
+    console.log(
+      `Bloom cache HIT: ${cached.count.toLocaleString()} addresses, ${formatBytes(cacheStat.size)} on disk.`,
+    );
+    return cached.filter;
   }
-  const filter = BloomFilter.create(Math.max(lines.length, 1024), 0.0001);
-  for (const a of lines) filter.add(a);
+
+  const capacity = estimateAddressCount(sourcePath, stat.size);
   console.log(
-    `Loaded ${lines.length} addresses into bloom filter (FP rate ~0.01%).`,
+    `Building bloom filter from ${sourcePath} (${formatBytes(stat.size)}), capacity=${capacity.toLocaleString()}, fp=${BLOOM_FP_RATE}`,
   );
+  const { filter, count } = await buildBloomFromStream(sourcePath, capacity);
+
+  console.log(`Saving bloom cache to ${BLOOM_CACHE_FILE}...`);
+  try {
+    await saveBloomCache(filter, stat.mtimeMs, count, capacity);
+    const cacheStat = fs.statSync(BLOOM_CACHE_FILE);
+    console.log(`Bloom cache saved (${formatBytes(cacheStat.size)}).`);
+  } catch (e) {
+    console.log(`Could not save bloom cache: ${e.message}`);
+  }
   return filter;
 }
 
@@ -138,7 +274,7 @@ async function getBalance(address) {
 async function main() {
   console.log("\n-----------------Warning Wallet Balance---------------!");
   const state = loadState();
-  const bloom = loadBloomFilter();
+  const bloom = await loadBloomFilter();
 
   const startCounter = state.counter;
   const startTime = Date.now();
@@ -210,17 +346,6 @@ async function main() {
       saveState(state);
     }
   }
-}
-
-let shuttingDown = false;
-function gracefulSave(state) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  try {
-    saveState(state);
-    console.log("\nState saved. Exiting.");
-  } catch (e) {}
-  process.exit(0);
 }
 
 main().catch((err) => {
