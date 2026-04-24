@@ -172,7 +172,9 @@ async function main() {
     process.exit(1);
   }
 
-  if (fs.existsSync(BLOOM_CACHE_FILE)) {
+  const isAddressList =
+    opts.out === DEFAULT_OUT || opts.out === "addresses.txt";
+  if (isAddressList && fs.existsSync(BLOOM_CACHE_FILE)) {
     try {
       fs.unlinkSync(BLOOM_CACHE_FILE);
       console.log(
@@ -181,9 +183,11 @@ async function main() {
     } catch (e) {}
   }
 
-  console.log(
-    `\nNext: run "node main.js" — it will detect ${path.basename(opts.out)} and build/cache the bloom filter automatically.`,
-  );
+  if (isAddressList) {
+    console.log(
+      `\nNext: run "node main.js" — it will detect ${path.basename(opts.out)} and build/cache the bloom filter automatically.`,
+    );
+  }
 }
 
 main();
