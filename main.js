@@ -464,11 +464,10 @@ async function main() {
     const rate = intervalSec > 0 ? Math.round(intervalScanned / intervalSec) : 0;
     const overallRate = elapsed > 0 ? Math.round(totalScanned / (elapsed / 1000)) : 0;
     const activeWorkers = [...workers.values()].filter((e) => !e.stopping).length;
-    const addrChecked = totalScanned * enabledTypeCount;
 
     console.log(
-      `[scan] ${rate.toLocaleString()} keys/s (avg ${overallRate.toLocaleString()}/s) | ` +
-      `Total wallet dibuat sesi ini: ${totalScanned.toLocaleString()} | ` +
+      `[scan] ${rate.toLocaleString()}/s (avg ${overallRate.toLocaleString()}/s) | ` +
+      `wallets: ${totalScanned.toLocaleString()} | ` +
       `workers: ${activeWorkers} | found: ${session.found} | ` +
       `up: ${formatDuration(elapsed)}`
     );

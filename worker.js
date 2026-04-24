@@ -41,25 +41,18 @@ const ENABLED_TYPES = Object.keys(TYPE_LABELS).filter(
 function processBatch(startCounter, count) {
   const hits = [];
   let scanned = 0;
-  let invalid = 0;
-  let vanityHits = 0;
-  let bloomMatches = 0;
 
   for (let i = 0; i < count; i++) {
     const counter = startCounter + i;
     const privKey = deriveKey(counter);
     scanned++;
 
-    if (!isValidPrivKey(privKey)) {
-      invalid++;
-      continue;
-    }
+    if (!isValidPrivKey(privKey)) continue;
 
     let addrs;
     try {
       addrs = deriveEnabled(privKey, addressTypes);
     } catch (e) {
-      invalid++;
       continue;
     }
 
@@ -79,13 +72,11 @@ function processBatch(startCounter, count) {
           wif: wifEncode(privKey, meta.compressed),
           privHex: toHex(privKey),
         });
-        if (vanity) vanityHits++;
-        if (bloomMatch) bloomMatches++;
       }
     }
   }
 
-  return { scanned, invalid, vanityHits, bloomMatches, hits };
+  return { scanned, hits };
 }
 
 parentPort.on("message", (msg) => {
