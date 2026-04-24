@@ -1,7 +1,7 @@
-const fs = require("fs");
-const https = require("https");
-const http = require("http");
-const path = require("path");
+import * as fs from "fs";
+import * as https from "https";
+import * as http from "http";
+import * as path from "path";
 
 const DEFAULT_URL =
   "http://addresses.loyce.club/Bitcoin_addresses_LATEST.txt.gz";
