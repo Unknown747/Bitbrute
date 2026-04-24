@@ -12,6 +12,7 @@ const LEGACY_BLOOM_CACHE_FILE = "addresses.bloom.gz";
 const MAX_RETRIES = 10;
 const IDLE_TIMEOUT_MS = 60000;
 const RETRY_DELAY_MS = 5000;
+const BAR_WIDTH = 28;
 
 function parseArgs(argv) {
   const opts = { url: DEFAULT_URL, out: DEFAULT_OUT, force: false };
@@ -46,11 +47,20 @@ function fmtBytes(n) {
 }
 
 function fmtDuration(ms) {
+  if (!isFinite(ms) || ms < 0) return "--";
   const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${sec}s`;
   return `${sec}s`;
+}
+
+function fmtBar(ratio) {
+  const filled = Math.round(Math.min(1, Math.max(0, ratio)) * BAR_WIDTH);
+  const empty = BAR_WIDTH - filled;
+  return "[" + "█".repeat(filled) + "░".repeat(empty) + "]";
 }
 
 function sleep(ms) {
@@ -84,7 +94,7 @@ function get(url, headers = {}, redirectsLeft = 5) {
   });
 }
 
-async function downloadChunk(url, tmpPath, startByte) {
+async function downloadChunk(url, tmpPath, startByte, sessionStartByte, overallStart) {
   const headers = {};
   if (startByte > 0) {
     headers["Range"] = `bytes=${startByte}-`;
@@ -119,11 +129,10 @@ async function downloadChunk(url, tmpPath, startByte) {
 
   const file = fs.createWriteStream(tmpPath, { flags: startByte > 0 ? "a" : "w" });
   let received = startByte;
-  const start = Date.now();
   let lastPrint = 0;
   let idleTimer = null;
 
-  function resetIdle(reject) {
+  function resetIdle(rejectFn) {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       file.destroy();
@@ -137,20 +146,28 @@ async function downloadChunk(url, tmpPath, startByte) {
     res.on("data", (chunk) => {
       received += chunk.length;
       resetIdle(reject);
+
       const now = Date.now();
-      if (now - lastPrint > 1000) {
-        const elapsed = (now - start) / 1000;
-        const rate = (received - startByte) / elapsed;
-        const pct =
-          totalBytes > 0
-            ? `${((received / totalBytes) * 100).toFixed(1)}%`
-            : "??";
-        const eta =
-          totalBytes > 0 && rate > 0
-            ? fmtDuration(((totalBytes - received) / rate) * 1000)
-            : "??";
+      if (now - lastPrint > 250) {
+        const sessionElapsedSec = (now - overallStart) / 1000;
+        const sessionDownloaded = received - sessionStartByte;
+        const sessionRate = sessionElapsedSec > 0 ? sessionDownloaded / sessionElapsedSec : 0;
+
+        const pct = totalBytes > 0 ? received / totalBytes : 0;
+        const bar = totalBytes > 0 ? fmtBar(pct) : fmtBar(0);
+        const pctStr = totalBytes > 0 ? `${(pct * 100).toFixed(1)}%` : "??%";
+        const etaMs = totalBytes > 0 && sessionRate > 0
+          ? ((totalBytes - received) / sessionRate) * 1000
+          : -1;
+        const etaStr = etaMs >= 0 ? fmtDuration(etaMs) : "--";
+        const rateStr = `${fmtBytes(sessionRate)}/s`;
+        const sizeStr = totalBytes > 0
+          ? `${fmtBytes(received)} / ${fmtBytes(totalBytes)}`
+          : fmtBytes(received);
+        const elapsed = fmtDuration(now - overallStart);
+
         process.stdout.write(
-          `\r  ${fmtBytes(received)}${totalBytes > 0 ? " / " + fmtBytes(totalBytes) : ""}  ${pct}  ${fmtBytes(rate)}/s  ETA ${eta}        `,
+          `\r  ${bar} ${pctStr.padStart(5)}  ${sizeStr}  ${rateStr}  ETA ${etaStr}  elapsed ${elapsed}   `
         );
         lastPrint = now;
       }
@@ -162,7 +179,6 @@ async function downloadChunk(url, tmpPath, startByte) {
       if (idleTimer) clearTimeout(idleTimer);
       file.close((err) => {
         if (err) return reject(err);
-        process.stdout.write("\n");
         resolve({ totalBytes: Math.max(totalBytes, received), done: false });
       });
     });
@@ -190,25 +206,31 @@ async function download(url, outPath) {
   if (fs.existsSync(tmpPath)) {
     startByte = fs.statSync(tmpPath).size;
     if (startByte > 0) {
-      console.log(`Resuming from ${fmtBytes(startByte)} (found partial file).`);
+      console.log(`Resuming from ${fmtBytes(startByte)} (found partial file from previous run).`);
     }
   }
 
+  const sessionStartByte = startByte;
   const overallStart = Date.now();
+
+  console.log("");
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const { totalBytes, done } = await downloadChunk(url, tmpPath, startByte);
+      const { totalBytes, done } = await downloadChunk(
+        url, tmpPath, startByte, sessionStartByte, overallStart
+      );
 
-      if (done) {
-        break;
-      }
+      process.stdout.write("\n");
+
+      if (done) break;
 
       const currentSize = fs.existsSync(tmpPath) ? fs.statSync(tmpPath).size : 0;
       if (totalBytes > 0 && currentSize < totalBytes) {
         startByte = currentSize;
+        const pct = ((currentSize / totalBytes) * 100).toFixed(1);
         console.log(
-          `\n[retry ${attempt}/${MAX_RETRIES}] Incomplete (${fmtBytes(currentSize)} of ${fmtBytes(totalBytes)}), resuming in ${RETRY_DELAY_MS / 1000}s...`,
+          `  [retry ${attempt}/${MAX_RETRIES}] Incomplete at ${pct}% (${fmtBytes(currentSize)} of ${fmtBytes(totalBytes)}), resuming in ${RETRY_DELAY_MS / 1000}s...`
         );
         await sleep(RETRY_DELAY_MS);
         continue;
@@ -216,14 +238,16 @@ async function download(url, outPath) {
 
       break;
     } catch (err) {
+      process.stdout.write("\n");
       const currentSize = fs.existsSync(tmpPath) ? fs.statSync(tmpPath).size : 0;
       startByte = currentSize;
       if (attempt >= MAX_RETRIES) {
         try { fs.unlinkSync(tmpPath); } catch (_) {}
         throw new Error(`Failed after ${MAX_RETRIES} attempts: ${err.message}`);
       }
+      const pct = startByte > 0 ? ` at ${fmtBytes(startByte)}` : "";
       console.log(
-        `\n[retry ${attempt}/${MAX_RETRIES}] Error: ${err.message}. Resuming from ${fmtBytes(startByte)} in ${RETRY_DELAY_MS / 1000}s...`,
+        `  [retry ${attempt}/${MAX_RETRIES}] ${err.message}${pct} — resuming in ${RETRY_DELAY_MS / 1000}s...`
       );
       await sleep(RETRY_DELAY_MS);
     }
@@ -237,7 +261,8 @@ async function download(url, outPath) {
 
   const finalSize = fs.statSync(outPath).size;
   const elapsed = Date.now() - overallStart;
-  console.log(`\nDone: ${fmtBytes(finalSize)} in ${fmtDuration(elapsed)}.`);
+  const sessionDownloaded = finalSize - sessionStartByte;
+  console.log(`Done: ${fmtBytes(finalSize)} total  (downloaded ${fmtBytes(sessionDownloaded)} this session in ${fmtDuration(elapsed)})`);
 }
 
 async function main() {
@@ -246,7 +271,7 @@ async function main() {
   if (fs.existsSync(opts.out) && !opts.force) {
     const stat = fs.statSync(opts.out);
     console.log(
-      `${opts.out} already exists (${fmtBytes(stat.size)}, modified ${stat.mtime.toISOString()}).`,
+      `${opts.out} already exists (${fmtBytes(stat.size)}, modified ${stat.mtime.toISOString()}).`
     );
     console.log("Use --force to re-download.");
     process.exit(0);
@@ -267,7 +292,7 @@ async function main() {
         try {
           fs.unlinkSync(f);
           console.log(
-            `Removed stale ${f} — main.js will rebuild it on next start.`,
+            `Removed stale ${f} — main.js will rebuild it on next start.`
           );
         } catch (e) {}
       }
@@ -276,7 +301,7 @@ async function main() {
 
   if (isAddressList) {
     console.log(
-      `\nNext: run "node main.js" — it will detect ${path.basename(opts.out)} and build/cache the bloom filter automatically.`,
+      `\nNext: run "node main.js" — it will detect ${path.basename(opts.out)} and build/cache the bloom filter automatically.`
     );
   }
 }
