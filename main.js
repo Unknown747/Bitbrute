@@ -27,22 +27,28 @@ const VANITY_PATTERNS = [
 ];
 
 const BLOOM_FP_RATE = 0.0001;
-const PROGRESS_INTERVAL = 1000;
 const SAVE_INTERVAL = 1000;
+const YIELD_INTERVAL = 200;
 
 const BUILD_PROGRESS_LINES = 1_000_000;
 const BUILD_YIELD_LINES = 50_000;
 
 const apiState = { pause: 0 };
 
+const session = {
+  startTime: 0,
+  startCounter: 0,
+  vanity: 0,
+  bloomMatch: 0,
+  found: 0,
+};
+
 function loadState() {
   if (fs.existsSync(STATE_FILE)) {
     try {
       const s = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
       if (s.seed && typeof s.counter === "number") {
-        console.log(
-          `Resuming deterministic scan: seed=${s.seed.slice(0, 8)}... counter=${s.counter}`,
-        );
+        s.totals = s.totals || { vanity: 0, bloomMatch: 0, found: 0 };
         return s;
       }
     } catch (e) {
@@ -50,11 +56,12 @@ function loadState() {
     }
   }
   const seed = crypto.randomBytes(32).toString("hex");
-  const state = { seed, counter: 0 };
+  const state = {
+    seed,
+    counter: 0,
+    totals: { vanity: 0, bloomMatch: 0, found: 0 },
+  };
   saveState(state);
-  console.log(
-    `New deterministic scan started: seed=${seed.slice(0, 8)}... counter=0`,
-  );
   return state;
 }
 
@@ -271,13 +278,71 @@ async function getBalance(address) {
   }
 }
 
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}h ${m}m ${sec}s`;
+  if (m > 0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+function printStartStats(state, bloom) {
+  console.log("");
+  console.log("================ START ================");
+  if (state.counter === 0) {
+    console.log(`  Mode      : new scan (seed=${state.seed.slice(0, 8)}...)`);
+  } else {
+    console.log(
+      `  Mode      : resume (seed=${state.seed.slice(0, 8)}..., counter=${state.counter.toLocaleString()})`,
+    );
+  }
+  console.log(`  Bloom     : ${bloom ? "enabled" : "disabled (API per key)"}`);
+  console.log(
+    `  Lifetime  : vanity=${state.totals.vanity}  bloom-match=${state.totals.bloomMatch}  found=${state.totals.found}`,
+  );
+  console.log("=======================================");
+  console.log("");
+}
+
+function printStopStats(state) {
+  const elapsed = Date.now() - session.startTime;
+  const scanned = state.counter - session.startCounter;
+  const rate = elapsed > 0 ? (scanned / (elapsed / 1000)).toFixed(1) : "0";
+  console.log("");
+  console.log("================ STOP =================");
+  console.log(`  Session   : ${formatDuration(elapsed)}`);
+  console.log(`  Scanned   : ${scanned.toLocaleString()} keys (${rate}/s)`);
+  console.log(
+    `  Hits      : vanity=${session.vanity}  bloom-match=${session.bloomMatch}  found=${session.found}`,
+  );
+  console.log(`  Counter   : ${state.counter.toLocaleString()}`);
+  console.log(
+    `  Lifetime  : vanity=${state.totals.vanity}  bloom-match=${state.totals.bloomMatch}  found=${state.totals.found}`,
+  );
+  console.log("=======================================");
+  console.log("");
+}
+
 async function main() {
-  console.log("\n-----------------Warning Wallet Balance---------------!");
   const state = loadState();
   const bloom = await loadBloomFilter();
 
-  const startCounter = state.counter;
-  const startTime = Date.now();
+  session.startCounter = state.counter;
+  session.startTime = Date.now();
+  printStartStats(state, bloom);
+
+  const shutdown = (signal) => {
+    try {
+      saveState(state);
+    } catch (e) {}
+    console.log(`\nReceived ${signal}, stopping...`);
+    printStopStats(state);
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   while (true) {
     const privBuf = deriveKeyFromSeed(state.seed, state.counter);
@@ -306,6 +371,8 @@ async function main() {
         `Public Key: ${pubHex.toUpperCase()}\n`;
       console.log(rec);
       fs.appendFileSync(VANITY_FILE, rec);
+      session.vanity++;
+      state.totals.vanity++;
     }
 
     let queryApi = !bloom;
@@ -317,6 +384,8 @@ async function main() {
         `Private Key (hex): ${privHex}\n`;
       console.log(rec);
       fs.appendFileSync(NEAR_MISS_FILE, rec);
+      session.bloomMatch++;
+      state.totals.bloomMatch++;
       queryApi = true;
     }
 
@@ -332,18 +401,18 @@ async function main() {
           `Public Key: ${pubHex.toUpperCase()}\n`;
         console.log(rec);
         fs.appendFileSync(FOUND_FILE, rec);
+        session.found++;
+        state.totals.found++;
       }
     }
 
     state.counter++;
 
-    if (state.counter % PROGRESS_INTERVAL === 0) {
-      const elapsed = (Date.now() - startTime) / 1000;
-      const rate = ((state.counter - startCounter) / elapsed).toFixed(1);
-      console.log(`[${state.counter}] ${address}  (${rate}/s)`);
-    }
     if (state.counter % SAVE_INTERVAL === 0) {
       saveState(state);
+    }
+    if (state.counter % YIELD_INTERVAL === 0) {
+      await new Promise((r) => setImmediate(r));
     }
   }
 }
