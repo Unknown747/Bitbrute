@@ -450,10 +450,41 @@ async function main() {
 
   const scaleTimer = setInterval(scaleTick, scaling.intervalMs);
 
+  let lastStatusScanned = 0;
+  let lastStatusTime = Date.now();
+  const STATUS_INTERVAL_MS = 10000;
+
+  function printStatus() {
+    if (stopping) return;
+    const now = Date.now();
+    const elapsed = now - session.startTime;
+    const totalScanned = session.scanned;
+    const intervalScanned = totalScanned - lastStatusScanned;
+    const intervalSec = (now - lastStatusTime) / 1000;
+    const rate = intervalSec > 0 ? Math.round(intervalScanned / intervalSec) : 0;
+    const overallRate = elapsed > 0 ? Math.round(totalScanned / (elapsed / 1000)) : 0;
+    const activeWorkers = [...workers.values()].filter((e) => !e.stopping).length;
+    const addrChecked = totalScanned * enabledTypeCount;
+
+    console.log(
+      `[scan] ${rate.toLocaleString()} keys/s (avg ${overallRate.toLocaleString()}/s) | ` +
+      `keys: ${totalScanned.toLocaleString()} | addrs: ${addrChecked.toLocaleString()} | ` +
+      `counter: ${state.counter.toLocaleString()} | workers: ${activeWorkers} | ` +
+      `vanity: ${session.vanity} | bloom: ${session.bloomMatch} | found: ${session.found} | ` +
+      `up: ${formatDuration(elapsed)}`
+    );
+
+    lastStatusScanned = totalScanned;
+    lastStatusTime = now;
+  }
+
+  const statusTimer = setInterval(printStatus, STATUS_INTERVAL_MS);
+
   const shutdown = (signal) => {
     if (stopping) return;
     stopping = true;
     clearInterval(scaleTimer);
+    clearInterval(statusTimer);
     console.log(`\nReceived ${signal}, draining workers...`);
     for (const entry of workers.values()) {
       entry.stopping = true;
